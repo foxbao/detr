@@ -85,7 +85,7 @@ def get_args_parser():
     parser.add_argument('--coco_panoptic_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
 
-    parser.add_argument('--output_dir', default='',
+    parser.add_argument('--output_dir', default='output',
                         help='path where to save, empty for no saving')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
@@ -172,17 +172,34 @@ def main(args):
     output_dir = Path(args.output_dir)
     writer = SummaryWriter(log_dir=args.output_dir)
 
-    if args.resume:
-        if args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            args.start_epoch = checkpoint['epoch'] + 1
+    # if args.resume:
+    #     if args.resume.startswith('https'):
+    #         checkpoint = torch.hub.load_state_dict_from_url(
+    #             args.resume, map_location='cpu', check_hash=True)
+    #     else:
+    #         checkpoint = torch.load(args.resume, map_location='cpu')
+    #     model_without_ddp.load_state_dict(checkpoint['model'])
+    #     if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+    #         optimizer.load_state_dict(checkpoint['optimizer'])
+    #         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+    #         args.start_epoch = checkpoint['epoch'] + 1
+            
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+        ckpt_dir = Path(args.output_dir) / 'ckpt'
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        if not args.resume:
+            checkpoints = sorted(ckpt_dir.glob("checkpoint_epoch_*.pth"))
+            if checkpoints:
+                def extract_epoch(ckpt_path):
+                    return int(ckpt_path.stem.replace("checkpoint_epoch_", ""))
+
+                latest_ckpt = max(checkpoints, key=extract_epoch)
+                print(f"Auto-resuming from checkpoint: {latest_ckpt}")
+                args.resume = str(latest_ckpt)
+                args.start_epoch = extract_epoch(latest_ckpt) + 1
 
     if args.eval:
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
@@ -200,20 +217,6 @@ def main(args):
             model, criterion, data_loader_train, optimizer, device, epoch,
             args.clip_max_norm)
         lr_scheduler.step()
-
-        if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            # extra checkpoint before LR drop and every 100 epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 100 == 0:
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
         # if args.output_dir:
         #     checkpoint_paths = [output_dir / 'checkpoint.pth']
         #     # extra checkpoint before LR drop and every 100 epochs
@@ -227,6 +230,23 @@ def main(args):
         #             'epoch': epoch,
         #             'args': args,
         #         }, checkpoint_path)
+                
+        if args.output_dir:
+            ckpt_dir = output_dir / 'ckpt'
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+            checkpoint_paths = [
+                ckpt_dir / 'latest_model.pth',
+                ckpt_dir / f'checkpoint_epoch_{epoch:04}.pth'
+            ]
+            for checkpoint_path in checkpoint_paths:
+                utils.save_on_master({
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'args': args,
+                }, checkpoint_path)
 
         test_stats, coco_evaluator = evaluate(
             model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
